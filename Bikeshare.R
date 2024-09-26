@@ -11,6 +11,7 @@ library(poissonreg)
 library(lubridate)
 library(rpart)
 library(glmnet)
+library(ranger)
 bikeshare <- vroom("train.csv")
 biketest <- vroom("test.csv")
 
@@ -330,3 +331,54 @@ kaggle_tree_submission <- tree_predict %>%
   mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 vroom_write(x=kaggle_tree_submission, file="./TreePreds.csv", delim=",")
+
+### Random Forest
+rf_mod <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=1000) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+## Create a workflow with model & recipe
+forest_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(rf_mod)
+
+## Set up grid of tuning values
+grid_of_tuning_params_forest <- grid_regular(mtry(range = c(1,10)),
+                                       min_n(),
+                                       levels = 5)
+
+
+forestfolds <- vfold_cv(bikeshare, v = 6, repeats=1)
+
+CV_results_forest <- forest_wf %>%
+  tune_grid(resamples=forestfolds,
+            grid = grid_of_tuning_params_forest,
+            metrics = metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+
+collect_metrics(CV_results_forest) %>%
+  filter(.metric=="rmse") %>%
+  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
+  geom_line()
+
+bestTune_forest <- CV_results_forest %>%
+  select_best(metric = "rmse")
+
+
+finalforest_wf <-
+  forest_wf %>%
+  finalize_workflow(bestTune_forest) %>%
+  fit(data=bikeshare)
+
+
+forest_predict <- finalforest_wf %>%
+  predict(new_data = biketest)
+
+kaggle_forest_submission <- forest_predict %>%
+  bind_cols(., biketest) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and prediction variables
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+vroom_write(x=kaggle_forest_submission, file="./ForestPreds.csv", delim=",")
